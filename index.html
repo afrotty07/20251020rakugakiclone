@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <!-- index.html 内 head 部分の追加 -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>らくがきAR クローン プロトタイプ</title>
+    <link rel="stylesheet" href="styles.css" />
+    <!-- three.js ライブラリ -->
+    <script src="https://unpkg.com/three@0.150.0/build/three.min.js"></script>
+    <!-- WebXR Button helper（three.js examples） -->
+    <script src="https://unpkg.com/three@0.150.0/examples/jsm/webxr/ARButton.js"></script>
+</head>
+
+<body>
+    <div class="container">
+        <h1>らくがきAR クローン（プロトタイプ）</h1>
+        <input type="file" id="imageUpload" accept="image/*" />
+        <button id="startAR" disabled>Start AR</button>
+        <div id="errorMsg" class="error"></div>
+    </div>
+
+    <!-- AR 用 Canvas を three.js が自動追加 -->
+    <script src="app.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,22 @@
+body,
+html {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: sans-serif;
+}
+
+.container {
+    padding: 16px;
+}
+
+#errorMsg {
+    color: red;
+    margin-top: 8px;
+}
+
+#startAR {
+    margin-top: 12px;
+    padding: 8px 16px;
+    font-size: 16px;
+}
