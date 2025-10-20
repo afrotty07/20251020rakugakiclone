@@ -1,241 +1,358 @@
-// 基本設定
-let scene, camera, renderer;
-let reticle; // 置くためのレティクル（位置マーカー）
-let model;   // 落書きから生成した簡易モデル
+// app.js（ES Modules）
+import * as THREE from 'https://unpkg.com/three@0.150.0/build/three.module.js';
+
+// ------------------------------------------------------------
+// DOM 要素
+// ------------------------------------------------------------
 const imageUpload = document.getElementById('imageUpload');
 const startARBtn = document.getElementById('startAR');
-const errorMsg = document.getElementById('errorMsg');
+const errorMsgEl = document.getElementById('errorMsg');
+const cvStatusEl = document.getElementById('cvStatus');
 
+// ------------------------------------------------------------
+// three.js 基本セット
+// ------------------------------------------------------------
+let scene, camera, renderer;
+let reticle;   // 平面ヒット位置を示すレティクル
+let model;     // 生成済み 3D モデル（OpenCV結果または簡易Box）
+let xrSession; // XRSession（明示保持）
+
+// ------------------------------------------------------------
+// 画像バッファ
+// ------------------------------------------------------------
 let uploadedImage = null;
 
+// ------------------------------------------------------------
+// OpenCV 初期化待ち（読み込めたら true）
+// ------------------------------------------------------------
+let cvReady = false;
+
+async function waitForOpenCVReady() {
+    // OpenCV.js が読み込まれ `cv` が定義されたら true を返す。
+    // onRuntimeInitialized の有無に対応。
+    return new Promise((resolve) => {
+        const tick = () => {
+            if (typeof cv !== 'undefined' && cv && cv.Mat) {
+                resolve(true);
+            } else {
+                setTimeout(tick, 50);
+            }
+        };
+        // onRuntimeInitialized を使えるケースにも対応
+        if (typeof cv !== 'undefined') {
+            if (cv && cv.Mat) {
+                resolve(true);
+            } else {
+                cv['onRuntimeInitialized'] = () => resolve(true);
+            }
+        } else {
+            tick();
+        }
+    });
+}
+
+waitForOpenCVReady().then(() => {
+    cvReady = true;
+    if (cvStatusEl) cvStatusEl.textContent = 'OpenCV: ready';
+    console.log('OpenCV.js is ready');
+}).catch(() => {
+    cvReady = false;
+    if (cvStatusEl) cvStatusEl.textContent = 'OpenCV: not available';
+});
+
+// ------------------------------------------------------------
+// ユーティリティ
+// ------------------------------------------------------------
+function showError(message) {
+    errorMsgEl.textContent = message;
+    errorMsgEl.classList.add('show');
+}
+function clearError() {
+    errorMsgEl.textContent = '';
+    errorMsgEl.classList.remove('show');
+}
+
+// ------------------------------------------------------------
+// 画像アップロード：読み込み完了で StartAR を有効化
+// ------------------------------------------------------------
 imageUpload.addEventListener('change', (event) => {
-    const file = event.target.files[0];
+    clearError();
+    const file = event.target.files && event.target.files[0];
     if (!file) {
         uploadedImage = null;
         startARBtn.disabled = true;
         return;
     }
     const imgURL = URL.createObjectURL(file);
-    uploadedImage = new Image();
-    uploadedImage.onload = () => {
-        console.log('画像読み込み完了:', uploadedImage.width, uploadedImage.height);
-        // 今回は読み込んだ画像をモデル生成のトリガーとする
-        startARBtn.disabled = false;
+    const img = new Image();
+    img.onload = () => {
+        uploadedImage = img;
+        console.log('画像読み込み完了:', img.width, img.height);
+        startARBtn.disabled = false; // ← ここで必ず有効化
     };
-    uploadedImage.src = imgURL;
+    img.onerror = () => {
+        uploadedImage = null;
+        startARBtn.disabled = true;
+        showError('画像の読み込みに失敗しました。別のファイルでお試しください。');
+    };
+    img.src = imgURL;
 });
 
-startARBtn.addEventListener('click', () => {
+// ------------------------------------------------------------
+// Start AR
+// ------------------------------------------------------------
+startARBtn.addEventListener('click', async () => {
+    clearError();
     if (!uploadedImage) {
-        errorMsg.textContent = '画像をアップロードしてください。';
+        showError('画像をアップロードしてください。');
         return;
     }
-    initAR();
+    // WebXR サポート確認
+    if (!navigator.xr || !navigator.xr.isSessionSupported) {
+        showError('この端末/ブラウザは WebXR に対応していません。');
+        return;
+    }
+    const supported = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
+    if (!supported) {
+        showError('この端末/ブラウザは「immersive-ar」に対応していません。');
+        return;
+    }
+
+    try {
+        await initAR(); // 初期化（three.js / hit-test 等）
+    } catch (e) {
+        console.error(e);
+        showError('AR の初期化に失敗しました。HTTPS や対応端末をご確認ください。');
+    }
 });
 
+// ------------------------------------------------------------
 // AR 初期化
+// ------------------------------------------------------------
 async function initAR() {
-    // レンダラー作成
+    // three.js renderer
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.xr.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // シーンとカメラ
+    // シーン / カメラ
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
     // ライト
-    const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
-    light.position.set(0.5, 1, 0.25);
-    scene.add(light);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.0);
+    hemi.position.set(0.5, 1, 0.25);
+    scene.add(hemi);
 
-    // レティクル（簡易：平面上に配置用マーカー）
-    const geometry = new THREE.RingGeometry(0.1, 0.15, 32).rotateX(- Math.PI / 2);
-    const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
-    reticle = new THREE.Mesh(geometry, material);
+    // レティクル（床ヒット表示）
+    const ring = new THREE.RingGeometry(0.08, 0.11, 32);
+    ring.rotateX(-Math.PI / 2);
+    const ringMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85 });
+    reticle = new THREE.Mesh(ring, ringMat);
     reticle.matrixAutoUpdate = false;
     reticle.visible = false;
     scene.add(reticle);
 
-    // モデル生成：今回はアップロード画像を元に簡易ボックスとして配置
-    // 実運用では輪郭抽出→骨格割り→モデル化処理を追加
+    // まずは簡易モデル（OpenCV結果があれば後で差し替え）
     model = new THREE.Mesh(
         new THREE.BoxGeometry(0.2, 0.2, 0.2),
-        new THREE.MeshStandardMaterial({ color: 0xff0000 })
+        new THREE.MeshStandardMaterial({ metalness: 0.1, roughness: 0.6 })
     );
     model.visible = false;
     scene.add(model);
 
-    // WebXR セッション開始
-    document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
-    renderer.xr.addEventListener('sessionstart', () => {
-        console.log('ARセッション開始');
-    });
-
-    const session = renderer.xr.getSession();
-    if (!session) {
-        // まだボタン押されてない可能性がある
-        renderer.xr.setSession(await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['hit-test'] }));
+    // 画像から骨格風パーツを作る（OpenCV が使える場合）
+    if (cvReady) {
+        try {
+            const parts = await processDrawingImage(uploadedImage);
+            if (parts) {
+                replaceWithSkeleton(parts);
+            }
+        } catch (e) {
+            console.warn('OpenCV 処理エラー:', e);
+            // 失敗しても簡易 Box で継続
+        }
     }
 
-    const referenceSpace = await renderer.xr.getReferenceSpace(); // local reference space
-    const viewerSpace = await renderer.xr.getSession().requestReferenceSpace('viewer');
-    const hitTestSource = await renderer.xr.getSession().requestHitTestSource({ space: viewerSpace });
+    // XR セッション開始（ユーザー操作の直後なのでジェスチャ要件を満たす）
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'] // 平面推定による配置
+    });
+    renderer.xr.setSession(xrSession);
 
+    const refSpace = await renderer.xr.getReferenceSpace();    // 'local' 既定
+    const viewerSpace = await xrSession.requestReferenceSpace('viewer');
+    const hitTestSource = await xrSession.requestHitTestSource({ space: viewerSpace });
+
+    // レンダーループ
     renderer.setAnimationLoop((time, frame) => {
         if (frame) {
-            const viewerPose = frame.getViewerPose(referenceSpace);
-            if (viewerPose) {
-                const hitTestResults = frame.getHitTestResults(hitTestSource);
-                if (hitTestResults.length > 0) {
-                    const hit = hitTestResults[0];
-                    const hitPose = hit.getPose(referenceSpace);
+            const results = frame.getHitTestResults(hitTestSource);
+            if (results && results.length > 0) {
+                const pose = results[0].getPose(refSpace);
+                if (pose) {
                     reticle.visible = true;
-                    reticle.matrix.fromArray(hitPose.transform.matrix);
-                } else {
-                    reticle.visible = false;
+                    reticle.matrix.fromArray(pose.transform.matrix);
                 }
+            } else {
+                reticle.visible = false;
             }
         }
         renderer.render(scene, camera);
     });
 
-    // タップ操作：レティクル位置にモデル配置
-    window.addEventListener('click', (ev) => {
+    // タップでレティクル位置にモデルを配置
+    window.addEventListener('click', () => {
         if (reticle.visible && model) {
             model.visible = true;
             model.position.setFromMatrixPosition(reticle.matrix);
-            model.scale.set(0.2, 0.2, 0.2);
-            // シンプルなアニメーション
             model.rotation.y = Math.random() * Math.PI * 2;
+            // 簡易ポップ（小さく→元サイズ）
+            model.scale.set(0.001, 0.001, 0.001);
+            popIn(model);
         }
     });
-    // 上記の app.js に続けて追加
 
-    function onOpenCvReady() {
-        console.log('OpenCV.js is ready');
+    // リサイズ対応
+    window.addEventListener('resize', onWindowResize);
+}
+
+function onWindowResize() {
+    if (!renderer || !camera) return;
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// ------------------------------------------------------------
+// 簡易アニメ（ポップイン）
+function popIn(mesh) {
+    const target = { s: 1 };
+    const start = performance.now();
+    const dur = 220; // ms
+    function step(t) {
+        const e = Math.min(1, (t - start) / dur);
+        const ease = 1 - Math.pow(1 - e, 3);
+        const s = 0.001 + (target.s - 0.001) * ease;
+        mesh.scale.set(s, s, s);
+        if (e < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+}
+
+// ------------------------------------------------------------
+// OpenCV：輪郭抽出 → 最大外枠 → バウンディング分割で簡易「頭/胴/脚」
+// ------------------------------------------------------------
+async function processDrawingImage(imageElement) {
+    // Canvasに描画して ImageData を得る
+    const canvas = document.createElement('canvas');
+    canvas.width = imageElement.width;
+    canvas.height = imageElement.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(imageElement, 0, 0, canvas.width, canvas.height);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // OpenCV Mat へ
+    let src = cv.matFromImageData(imageData);
+    let gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    // 前処理（ノイズ低減）
+    let blur = new cv.Mat();
+    cv.GaussianBlur(gray, blur, new cv.Size(3, 3), 0, 0, cv.BORDER_DEFAULT);
+
+    // 二値化（背景→白、線→黒 にするため INV + OTSU）
+    let binary = new cv.Mat();
+    cv.threshold(blur, binary, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
+
+    // モルフォロジーで線の途切れを少し補う（任意）
+    let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+    cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, kernel);
+
+    // 輪郭抽出（最大外枠）
+    let contours = new cv.MatVector();
+    let hierarchy = new cv.Mat();
+    cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    let maxArea = 0;
+    let maxContour = null;
+    for (let i = 0; i < contours.size(); i++) {
+        const c = contours.get(i);
+        const a = cv.contourArea(c, false);
+        if (a > maxArea) {
+            maxArea = a;
+            maxContour = c;
+        }
     }
 
-    // 画像アップロード後、輪郭抽出＋骨格割り付けを試みる
-    async function processDrawingImage(imageElement) {
-        // Canvas に描画して画像データ取得
-        const canvas = document.createElement('canvas');
-        canvas.width = imageElement.width;
-        canvas.height = imageElement.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(imageElement, 0, 0);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let parts = null;
+    if (maxContour) {
+        const rect = cv.boundingRect(maxContour);
+        // 非常に単純化：上20%を「頭」、中央40%を「胴」、下40%を「脚」
+        const headBox = {
+            x: rect.x + rect.width * 0.25,
+            y: rect.y,
+            width: rect.width * 0.5,
+            height: rect.height * 0.2
+        };
+        const bodyBox = {
+            x: rect.x + rect.width * 0.2,
+            y: rect.y + rect.height * 0.2,
+            width: rect.width * 0.6,
+            height: rect.height * 0.4
+        };
+        const legsBox = {
+            x: rect.x + rect.width * 0.2,
+            y: rect.y + rect.height * 0.6,
+            width: rect.width * 0.6,
+            height: rect.height * 0.4
+        };
 
-        // OpenCV.js マットに変換
-        let src = cv.matFromImageData(imageData);
-        let gray = new cv.Mat();
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-
-        // 二値化（適応閾値または固定閾値）
-        let binary = new cv.Mat();
-        cv.threshold(gray, binary, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-
-        // 輪郭検出
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
-        cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-        console.log('Contours found: ', contours.size());
-
-        // 最大輪郭（面積最大）を選定
-        let maxArea = 0;
-        let maxContour = null;
-        for (let i = 0; i < contours.size(); i++) {
-            let cnt = contours.get(i);
-            let area = cv.contourArea(cnt, false);
-            if (area > maxArea) {
-                maxArea = area;
-                maxContour = cnt;
-            }
-        }
-
-        if (maxContour) {
-            // 輪郭のバウンディングボックスを取得
-            let rect = cv.boundingRect(maxContour);
-            console.log('Bounding rect:', rect);
-
-            // 骨格割り付けの簡易ロジック：
-            // 頭＝バウンディングボックスの上部 20%、胴体＝中央 40%、脚＝下部 40%
-            const headBox = {
-                x: rect.x + rect.width * 0.25,
-                y: rect.y,
-                width: rect.width * 0.5,
-                height: rect.height * 0.2
-            };
-            const bodyBox = {
-                x: rect.x + rect.width * 0.2,
-                y: rect.y + rect.height * 0.2,
-                width: rect.width * 0.6,
-                height: rect.height * 0.4
-            };
-            const legsBox = {
-                x: rect.x + rect.width * 0.2,
-                y: rect.y + rect.height * 0.6,
-                width: rect.width * 0.6,
-                height: rect.height * 0.4
-            };
-
-            // Canvas 上に検出結果（デバッグ用）を描画
-            ctx.strokeStyle = 'red';
-            ctx.lineWidth = 3;
-            ctx.strokeRect(headBox.x, headBox.y, headBox.width, headBox.height);
-            ctx.strokeStyle = 'blue';
-            ctx.strokeRect(bodyBox.x, bodyBox.y, bodyBox.width, bodyBox.height);
-            ctx.strokeStyle = 'green';
-            ctx.strokeRect(legsBox.x, legsBox.y, legsBox.width, legsBox.height);
-
-            // この骨格情報を元に three.js モデル構成へ反映（例：頭・胴体・脚それぞれ Box ジオメトリを配置）
-            createSkeletonModel(headBox, bodyBox, legsBox, canvas.width, canvas.height);
-        }
-
-        // メモリ解放
-        src.delete();
-        gray.delete();
-        binary.delete();
-        contours.delete();
-        hierarchy.delete();
+        parts = { headBox, bodyBox, legsBox, imgW: canvas.width, imgH: canvas.height };
     }
 
-    // 骨格モデル生成（簡易版）
-    function createSkeletonModel(headBox, bodyBox, legsBox, imgW, imgH) {
-        // three.js 空間上にモデル生成
-        // 規定サイズをワールド座標系に変換（ここでは幅1単位を画像幅にマップ）
-        const scale = 0.001; // 調整値
-        const headGeom = new THREE.BoxGeometry(headBox.width * scale, headBox.height * scale, 0.1);
-        const bodyGeom = new THREE.BoxGeometry(bodyBox.width * scale, bodyBox.height * scale, 0.1);
-        const legsGeom = new THREE.BoxGeometry(legsBox.width * scale, legsBox.height * scale, 0.1);
+    // メモリ解放
+    src.delete(); gray.delete(); blur.delete(); binary.delete();
+    kernel.delete(); contours.delete(); hierarchy.delete();
 
-        const headMat = new THREE.MeshStandardMaterial({ color: 0xffff00 });
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xff00ff });
-        const legsMat = new THREE.MeshStandardMaterial({ color: 0x00ffff });
+    return parts;
+}
 
-        const headMesh = new THREE.Mesh(headGeom, headMat);
-        const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
-        const legsMesh = new THREE.Mesh(legsGeom, legsMat);
+// ------------------------------------------------------------
+// three.js モデルを「頭/胴/脚」構成に差し替える
+// ------------------------------------------------------------
+function replaceWithSkeleton(parts) {
+    const { headBox, bodyBox, legsBox } = parts;
 
-        // 位置調整（カメラから見て前方に配置・Y軸上下を反転調整など）
-        headMesh.position.set(0, (bodyBox.height * scale) / 2 + (headBox.height * scale) / 2, 0);
-        bodyMesh.position.set(0, 0, 0);
-        legsMesh.position.set(0, -(bodyBox.height * scale) / 2 - (legsBox.height * scale) / 2, 0);
+    const scale = 0.001; // 画像ピクセル → ワールド座標の縮尺
 
-        // 既存モデルをクリアして新規モデルを追加
-        if (model) {
-            scene.remove(model);
-        }
-        const group = new THREE.Group();
-        group.add(headMesh);
-        group.add(bodyMesh);
-        group.add(legsMesh);
+    const head = new THREE.Mesh(
+        new THREE.BoxGeometry(headBox.width * scale, headBox.height * scale, 0.08),
+        new THREE.MeshStandardMaterial({ color: 0xffe066, metalness: 0.05, roughness: 0.7 })
+    );
+    const body = new THREE.Mesh(
+        new THREE.BoxGeometry(bodyBox.width * scale, bodyBox.height * scale, 0.1),
+        new THREE.MeshStandardMaterial({ color: 0x66d9e8, metalness: 0.05, roughness: 0.7 })
+    );
+    const legs = new THREE.Mesh(
+        new THREE.BoxGeometry(legsBox.width * scale, legsBox.height * scale, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0xb197fc, metalness: 0.05, roughness: 0.7 })
+    );
 
-        model = group;
-        scene.add(model);
-        model.visible = false; // 配置時まで非表示
-    }
+    // 簡易的に「胴」を原点にし、そこから上下に配置
+    head.position.set(0, (bodyBox.height * scale) / 2 + (headBox.height * scale) / 2, 0);
+    body.position.set(0, 0, 0);
+    legs.position.set(0, -(bodyBox.height * scale) / 2 - (legsBox.height * scale) / 2, 0);
 
+    const group = new THREE.Group();
+    group.add(head);
+    group.add(body);
+    group.add(legs);
+
+    if (model) scene.remove(model);
+    model = group;
+    scene.add(model);
+    model.visible = false; // 置くまでは非表示
 }
