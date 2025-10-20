@@ -2,29 +2,43 @@
 <html lang="ja">
 
 <head>
-    <!-- index.html 内 head 部分の追加 -->
-    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
-
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>らくがきAR クローン プロトタイプ</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>らくがきAR クローン（プロトタイプ）</title>
     <link rel="stylesheet" href="styles.css" />
-    <!-- three.js ライブラリ -->
-    <script src="https://unpkg.com/three@0.150.0/build/three.min.js"></script>
-    <!-- WebXR Button helper（three.js examples） -->
-    <script src="https://unpkg.com/three@0.150.0/examples/jsm/webxr/ARButton.js"></script>
+    <!-- OpenCV.js はグローバルに `cv` を公開します。onload は使わず、app.js 内で初期化完了を待ちます。 -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 </head>
 
 <body>
     <div class="container">
         <h1>らくがきAR クローン（プロトタイプ）</h1>
-        <input type="file" id="imageUpload" accept="image/*" />
-        <button id="startAR" disabled>Start AR</button>
-        <div id="errorMsg" class="error"></div>
+
+        <div class="uploader">
+            <label for="imageUpload" class="label">落書き画像を選択</label>
+            <input type="file" id="imageUpload" accept="image/*" />
+            <p class="hint">※ 線がはっきりした白地の紙がおすすめです</p>
+        </div>
+
+        <div class="actions">
+            <button id="startAR" disabled>Start AR</button>
+            <span id="cvStatus" class="status">OpenCV: loading...</span>
+        </div>
+
+        <div id="errorMsg" class="error" role="alert" aria-live="polite"></div>
+
+        <details class="notes">
+            <summary>注意事項</summary>
+            <ul>
+                <li>HTTPS 環境でアクセスしてください（WebXR要件）。</li>
+                <li>WebXR（immersive-ar）と hit-test に対応した端末／ブラウザが必要です。</li>
+                <li>OpenCV.js が読み込まれていない場合、輪郭抽出はスキップされて簡易モデルのみ表示されます。</li>
+            </ul>
+        </details>
     </div>
 
-    <!-- AR 用 Canvas を three.js が自動追加 -->
-    <script src="app.js"></script>
+    <!-- ESM で app.js を読み込みます -->
+    <script type="module" src="app.js"></script>
 </body>
 
 </html>
